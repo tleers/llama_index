@@ -32,6 +32,8 @@ from llama_index.core.service_context_elements.llm_predictor import (
 )
 from llama_index.core.settings import Settings
 from llama_index.core.types import BasePydanticProgram
+import openai
+import logging
 
 DEFAULT_TITLE_NODE_TEMPLATE = """\
 Context: {context_str}. Give a title that summarizes all of \
@@ -125,25 +127,47 @@ class TitleExtractor(BaseExtractor):
 
         return separated_items
 
+
     async def extract_titles(self, nodes_by_doc_id: Dict) -> Dict:
         titles_by_doc_id = {}
         for key, nodes in nodes_by_doc_id.items():
-            title_candidates = await self.get_title_candidates(nodes)
-            combined_titles = ", ".join(title_candidates)
-            titles_by_doc_id[key] = await self.llm.apredict(
-                PromptTemplate(template=self.combine_template),
-                context_str=combined_titles,
-            )
+            try:
+                title_candidates = await self.get_title_candidates(nodes)
+                combined_titles = ", ".join(title_candidates)
+                titles_by_doc_id[key] = await self.llm.apredict(
+                    PromptTemplate(template=self.combine_template),
+                    context_str=combined_titles,
+                )
+            except openai.BadRequestError as e:
+                error_message = str(e)
+                titles_by_doc_id[key] = f"ERROR: {error_message}"
+                logging.error(f"Error while extracting titles: {error_message}")
+                logging.error(f"Title candidates: {title_candidates}")
+            except Exception:
+                titles_by_doc_id[key] = "ERROR"
+                logging.error(f"Unexpected error while extracting titles.")
+                logging.error(f"Title candidates: {title_candidates}")
         return titles_by_doc_id
 
     async def get_title_candidates(self, nodes: List[BaseNode]) -> List[str]:
-        title_jobs = [
-            self.llm.apredict(
-                PromptTemplate(template=self.node_template),
-                context_str=cast(TextNode, node).text,
-            )
-            for node in nodes
-        ]
+        title_jobs = []
+        for node in nodes:
+            try:
+                title_jobs.append(
+                    self.llm.apredict(
+                        PromptTemplate(template=self.node_template),
+                        context_str=cast(TextNode, node).text,
+                    )
+                )
+            except openai.BadRequestError as e:
+                error_message = str(e)
+                title_jobs.append(f"ERROR: {error_message}")
+                logging.error(f"Error while getting title candidates: {error_message}")
+                logging.error(f"Node text: {cast(TextNode, node).text}")
+            except Exception:
+                title_jobs.append("ERROR")
+                logging.error(f"Unexpected error while getting title candidates.")
+                logging.error(f"Node text: {cast(TextNode, node).text}")
         return await run_jobs(
             title_jobs, show_progress=self.show_progress, workers=self.num_workers
         )
@@ -187,23 +211,30 @@ class KeywordExtractor(BaseExtractor):
     def class_name(cls) -> str:
         return "KeywordExtractor"
 
-    async def _aextract_keywords_from_node(self, node: BaseNode) -> Dict[str, str]:
-        """Extract keywords from a node and return it's metadata dict."""
+    async def _aextract_questions_from_node(self, node: BaseNode) -> Dict[str, str]:    
+        """Extract questions from a node and return it's metadata dict."""
         if self.is_text_node_only and not isinstance(node, TextNode):
             return {}
 
-        # TODO: figure out a good way to allow users to customize keyword template
         context_str = node.get_content(metadata_mode=self.metadata_mode)
-        keywords = await self.llm.apredict(
-            PromptTemplate(
-                template=f"""\
-{{context_str}}. Give {self.keywords} unique keywords for this \
-document. Format as comma separated. Keywords: """
-            ),
-            context_str=context_str,
-        )
+        prompt = PromptTemplate(template=self.prompt_template)
+        try:
+            questions = await self.llm.apredict(
+                prompt, num_questions=self.questions, context_str=context_str
+            )
+        except openai.BadRequestError as e:
+            error_message = str(e)
+            questions = f"ERROR: {error_message}"
+            logging.error(f"Error while predicting questions: {error_message}")
+            logging.error(f"Context string: {context_str}")
+            logging.error(f"Node metadata: {node.metadata}")
+        except Exception:
+            questions = "ERROR"
+            logging.error(f"Unexpected error while predicting questions.")
+            logging.error(f"Context string: {context_str}")
+            logging.error(f"Node metadata: {node.metadata}")
 
-        return {"excerpt_keywords": keywords.strip()}
+        return {"questions_this_excerpt_can_answer": questions.strip()}
 
     async def aextract(self, nodes: Sequence[BaseNode]) -> List[Dict]:
         keyword_jobs = []
@@ -293,9 +324,21 @@ class QuestionsAnsweredExtractor(BaseExtractor):
 
         context_str = node.get_content(metadata_mode=self.metadata_mode)
         prompt = PromptTemplate(template=self.prompt_template)
-        questions = await self.llm.apredict(
-            prompt, num_questions=self.questions, context_str=context_str
-        )
+        try:
+            questions = await self.llm.apredict(
+                prompt, num_questions=self.questions, context_str=context_str
+            )
+        except openai.BadRequestError as e:
+            error_message = str(e)
+            questions = f"ERROR: {error_message}"
+            logging.error(f"Error while predicting questions: {error_message}")
+            logging.error(f"Context string: {context_str}")
+            logging.error(f"Node metadata: {node.metadata}")
+        except Exception:
+            questions = "ERROR"
+            logging.error(f"Unexpected error while predicting questions.")
+            logging.error(f"Context string: {context_str}")
+            logging.error(f"Node metadata: {node.metadata}")
 
         return {"questions_this_excerpt_can_answer": questions.strip()}
 
@@ -380,9 +423,21 @@ class SummaryExtractor(BaseExtractor):
             return ""
 
         context_str = node.get_content(metadata_mode=self.metadata_mode)
-        summary = await self.llm.apredict(
-            PromptTemplate(template=self.prompt_template), context_str=context_str
-        )
+        try:
+            summary = await self.llm.apredict(
+                PromptTemplate(template=self.prompt_template), context_str=context_str
+            )
+        except openai.BadRequestError as e:
+            error_message = str(e)
+            summary = f"ERROR: {error_message}"
+            logging.error(f"Error while generating node summary: {error_message}")
+            logging.error(f"Context string: {context_str}")
+            logging.error(f"Node metadata: {node.metadata}")
+        except Exception:
+            summary = "ERROR"
+            logging.error(f"Unexpected error while generating node summary.")
+            logging.error(f"Context string: {context_str}")
+            logging.error(f"Node metadata: {node.metadata}")
 
         return summary.strip()
 
